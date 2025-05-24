@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+langchain
+langchain-community
+llama-cpp-python
+pydantic
+python-multipart
+GitPython
