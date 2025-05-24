@@ -1,5 +1,5 @@
 # Python
-__pycache__/
+agent_app/__pycache__/
 *.py[cod]
 *$py.class
 *.so
