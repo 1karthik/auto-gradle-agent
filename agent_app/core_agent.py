@@ -17,8 +17,8 @@ MODEL_PATH = "C:\\Users\\karth\\models\\Nous-Hermes-2-Mistral-7B-DPO.Q4_K_M.gguf
 def create_agent_executor():
     llm = LlamaCpp(
         model_path=MODEL_PATH,
-        n_ctx=4096,
-        temperature=0.5,
+        n_ctx=8192,
+        temperature=0.2,
         verbose=True,
     )
 
@@ -204,46 +204,44 @@ def apply_fix(build_output: str):
     repo_name = github_url.split("/")[-1].replace(".git", "")
     repo_dir = os.path.join(os.path.dirname(__file__), "temp", repo_name)
 
-    print(f"[Step 7] Suggested fix: {suggestion}")
+    print(f"[Step 7] Raw LLM suggestion: {suggestion}")
 
-    # Parse the LLM response
     try:
-        error_type = suggestion.split("ERROR_TYPE:")[1].split("\n")[0].strip()
-        file_to_modify = suggestion.split("FILE_TO_MODIFY:")[1].split("\n")[0].strip()
+        # Just get the fix line
+        if "FIX:" not in suggestion:
+            print("[Step 7.1] No FIX: found in suggestion")
+            return "Error: Invalid suggestion format"
+            
         fix = suggestion.split("FIX:")[1].strip()
+        print(f"[Step 7.2] Extracted fix: {fix}")
         
-        print(f"[Step 7.1] Parsed fix: Type={error_type}, File={file_to_modify}, Fix={fix}")
+        # Apply the fix to build.gradle
+        build_gradle_path = os.path.join(repo_dir, "build.gradle")
+        print(f"[Step 7.3] Looking for build.gradle at: {build_gradle_path}")
         
-        if file_to_modify == "build.gradle":
-            build_gradle_path = os.path.join(repo_dir, "build.gradle")
-            if os.path.exists(build_gradle_path):
-                with open(build_gradle_path, 'r') as f:
-                    content = f.read()
-                
-                # Apply the fix
-                if "implementation" in fix:
-                    # Add new implementation
-                    with open(build_gradle_path, 'a') as f:
-                        f.write(f"\n{fix}\n")
-                else:
-                    # Replace existing implementation
-                    fixed_content = re.sub(r'(implementation\s+\"[^"]+):\d+\.\d+\.\d+\"', fix, content)
-                    with open(build_gradle_path, 'w') as f:
-                        f.write(fixed_content)
-                
-                print("[Step 8] Fix applied to build.gradle")
-                return "Fix applied to build.gradle."
-        
-        elif file_to_modify == "gradle.properties":
-            gradle_props_path = os.path.join(repo_dir, "gradle.properties")
-            if os.path.exists(gradle_props_path):
-                with open(gradle_props_path, 'a') as f:
-                    f.write(f"\n{fix}\n")
-                print("[Step 8] Fix applied to gradle.properties")
-                return "Fix applied to gradle.properties."
-        
-        print("[Step 8] No fix applied - could not find appropriate file to update")
-        return "No fix applied."
+        if os.path.exists(build_gradle_path):
+            print("[Step 7.4] Found build.gradle, reading current content...")
+            with open(build_gradle_path, 'r') as f:
+                lines = f.readlines()
+                print("[Step 7.5] Current build.gradle content:")
+                for line in lines:
+                    print(f"  {line.strip()}")
+            
+            print("[Step 7.6] Applying fix...")
+            with open(build_gradle_path, 'w') as f:
+                for line in lines:
+                    if "implementation" in line and "spring-boot-starter-web" in line:
+                        print(f"[Step 7.7] Found line to replace: {line.strip()}")
+                        print(f"[Step 7.8] Replacing with: {fix}")
+                        f.write(f"{fix}\n")
+                    else:
+                        f.write(line)
+            
+            print("[Step 8] Fix applied to build.gradle")
+            return f"Applied fix to build.gradle: {fix}"
+        else:
+            print(f"[Step 7.4] build.gradle not found at {build_gradle_path}")
+            return "No fix applied - build.gradle not found"
         
     except Exception as e:
         print(f"[Step 8] Error applying fix: {str(e)}")
