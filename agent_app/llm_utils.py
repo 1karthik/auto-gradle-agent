@@ -1,50 +1,62 @@
-# agent_app/llm_utils.py
-from langchain.prompts import PromptTemplate
-from langchain.chains import LLMChain
+# llm_utils.py
 from langchain_community.llms import LlamaCpp
-import re
 
-def create_llm_chain(llm: LlamaCpp) -> LLMChain:
-    """
-    Creates a LangChain LLMChain with a generic prompt for ReAct-style interaction.
-    """
-    # This prompt needs to be carefully designed for the LLM to understand ReAct steps.
-    # The actual prompt used in core_agent.py will be more specific.
-    prompt = PromptTemplate(
-        input_variables=["error_output", "gradle_properties_content", "build_gradle_content"],
-        template="" # The template will be provided dynamically in core_agent.py
-    )
-    return LLMChain(llm=llm, prompt=prompt)
+MODEL_PATH = "C:\\Users\\karth\\models\\Nous-Hermes-2-Mistral-7B-DPO.Q4_K_M.gguf"
 
-def parse_gradle_error_for_llm(build_output: str) -> str:
-    """
-    Parses the Gradle build output to extract relevant error messages for the LLM.
-    This is a simplification and would need more sophisticated parsing in a real scenario.
-    """
-    # Look for common error patterns
-    error_patterns = [
-        r"(?s)FAILURE: Build failed with an exception\.",
-        r"(?s)\* What went wrong:(.*?)\* Try:",
-        r"(?s)Could not resolve all dependencies for configuration ':(.*?)'",
-        r"(?s)Execution failed for task '(.*?)'",
-        r"(?s)Caused by:(.*?)(?:\n\n|\Z)",
-        r"(?s)Error:(.*?)(?:\n\n|\Z)"
-    ]
+llm = LlamaCpp(
+    model_path=MODEL_PATH,
+    n_ctx=4096,
+    temperature=0.5,
+    verbose=True,
+)
 
-    extracted_errors = []
-    for pattern in error_patterns:
-        matches = re.findall(pattern, build_output, re.DOTALL | re.IGNORECASE)
-        for match in matches:
-            extracted_errors.append(match.strip())
-            # Limit the amount of error output fed to the LLM to save context window
-            if len("\n".join(extracted_errors)) > 1500: # Arbitrary limit
-                break
-        if len("\n".join(extracted_errors)) > 1500:
-            break
-            
-    if extracted_errors:
-        return "\n".join(extracted_errors)
-    else:
-        # If no specific patterns found, return a snippet of the end of the output
-        lines = build_output.splitlines()
-        return "\n".join(lines[-50:]) if len(lines) > 50 else build_output
+def ask_llm_for_fix(build_output):
+    prompt = f"""
+You are a Gradle build expert. The build failed with the following output:
+
+{build_output}
+
+Analyze the error and provide a fix. Follow these steps:
+1. Identify the specific error type (dependency conflict, version mismatch, missing dependency, etc.)
+2. Determine which file needs to be modified (build.gradle or gradle.properties)
+3. Provide the exact change needed
+
+Return your response in this format:
+ERROR_TYPE: [type of error]
+FILE_TO_MODIFY: [build.gradle or gradle.properties]
+FIX: [exact line(s) to add or modify]
+
+Rules for fixes:
+1. For build.gradle:
+   - If adding a new dependency, use: implementation 'group:artifact:version'
+   - If updating a version, provide the complete implementation line
+   - If fixing a conflict, provide the resolution strategy
+
+2. For gradle.properties:
+   - Use property=value format
+   - Include the full property name
+   - Add one property per line
+
+Example responses:
+
+For missing dependency:
+ERROR_TYPE: Missing dependency
+FILE_TO_MODIFY: build.gradle
+FIX: implementation 'org.springframework.boot:spring-boot-starter-web:2.7.0'
+
+For version conflict:
+ERROR_TYPE: Version conflict
+FILE_TO_MODIFY: build.gradle
+FIX: implementation('org.springframework.boot:spring-boot-starter-web:2.7.0') {{ force = true }}
+
+For property setting:
+ERROR_TYPE: Missing property
+FILE_TO_MODIFY: gradle.properties
+FIX: spring.version=5.3.0
+
+If you cannot determine a fix, respond with:
+ERROR_TYPE: Unknown error
+FILE_TO_MODIFY: none
+FIX: Unable to determine fix from the error message
+"""
+    return llm.invoke(prompt).strip()

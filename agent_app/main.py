@@ -1,71 +1,91 @@
-# agent_app/main.py
-from fastapi import FastAPI, HTTPException
+# main.py
+from fastapi import FastAPI
 from pydantic import BaseModel
+import uvicorn
+from core_agent import create_agent_executor, update_dependency, run_gradle_build, apply_fix
 import os
-import shutil
-from pathlib import Path
+from git import Repo
 
-from core_agent import GradleBuildFixingAgent
+app = FastAPI()
 
-app = FastAPI(
-    title="Gradle Build Fixer Agent",
-    description="An agent to update Gradle properties and fix build errors using a local LLM."
-)
-
-class ProjectUpdateRequest(BaseModel):
-    project_url: str  # e.g., "https://github.com/your-org/your-project.git"
+class FixRequest(BaseModel):
+    github_url: str
     dependency_name: str
-    dependency_value: str
+    dependency_version: str
 
-# Define a temporary directory for cloning projects
-TEMP_PROJECTS_DIR = Path("temp_projects")
-TEMP_PROJECTS_DIR.mkdir(exist_ok=True)
-
-@app.post("/update_and_build/")
-async def update_and_build_project(request: ProjectUpdateRequest):
-    project_name = request.project_url.split('/')[-1].replace(".git", "")
-    project_path = TEMP_PROJECTS_DIR / project_name
-
-    # 1. Clone the project (simplified - error handling and existing dir handling needed)
-    if project_path.exists():
-        shutil.rmtree(project_path) # Clean up previous clone for fresh start
+@app.post("/fix")
+def fix_dependency(request: FixRequest):
+    print("\n[API] Starting dependency fix process...")
     
-    clone_command = f"git clone {request.project_url} {project_path}"
-    print(f"Cloning project: {clone_command}")
-    os.system(clone_command) # In a real app, use subprocess.run for better control
-
-    if not project_path.exists():
-        raise HTTPException(status_code=500, detail="Failed to clone project.")
-
-    # Initialize the agent
-    # Model path would likely come from an environment variable or config
-    llm_model_path = os.getenv("LLM_MODEL_PATH", "./agent_app/models/Nous-Hermes-2-Mistral-7B-DPO.Q4_K_M.gguf")
+    # Step 1: Download project to agent_app/temp
+    temp_dir = os.path.join(os.path.dirname(__file__), "temp")
+    os.makedirs(temp_dir, exist_ok=True)
     
-    agent = GradleBuildFixingAgent(
-        project_path=project_path,
-        llm_model_path=llm_model_path
-    )
-
-    try:
-        # 2. Update gradle.properties
-        update_success = agent.update_gradle_properties(
-            request.dependency_name,
-            request.dependency_value
-        )
-        if not update_success:
-            raise HTTPException(status_code=500, detail="Failed to update gradle.properties.")
-
-        # 3. Run initial build and fix if needed
-        build_result = await agent.run_and_fix_build()
+    repo_name = request.github_url.split("/")[-1].replace(".git", "")
+    repo_dir = os.path.join(temp_dir, repo_name)
+    
+    print(f"[API] Cloning repository to {repo_dir}")
+    if os.path.exists(repo_dir):
+        import shutil
+        shutil.rmtree(repo_dir)
+    Repo.clone_from(request.github_url, repo_dir)
+    
+    # Step 2: Update dependency version
+    print(f"[API] Updating dependency {request.dependency_name} to version {request.dependency_version}")
+    update_result = update_dependency({
+        "github_url": request.github_url,
+        "dependency_name": request.dependency_name,
+        "dependency_version": request.dependency_version
+    })
+    
+    # Step 3: Run initial Gradle build
+    print("[API] Running initial Gradle build")
+    build_result = run_gradle_build({"github_url": request.github_url})
+    
+    # Step 4: If build failed, try fixes with retry logic
+    if "Build succeeded" not in build_result:
+        print("[API] Initial build failed, starting fix attempts...")
+        max_attempts = 3
+        attempt = 1
+        last_fix_result = None
         
-        # 4. Clean up the cloned project (optional, depends on desired behavior)
-        # shutil.rmtree(project_path)
+        while attempt <= max_attempts:
+            print(f"\n[API] Fix attempt {attempt} of {max_attempts}")
+            
+            # Get LLM suggestion and apply fix
+            fix_result = apply_fix(build_result)
+            print(f"[API] Fix result: {fix_result}")
+            
+            if "Error applying fix" in fix_result or "No fix applied" in fix_result:
+                print("[API] No valid fix received from LLM, stopping attempts")
+                break
+                
+            last_fix_result = fix_result
+            
+            # Run build again to verify fix
+            print(f"[API] Running build after fix attempt {attempt}")
+            build_result = run_gradle_build({"github_url": request.github_url})
+            
+            if "Build succeeded" in build_result:
+                print(f"[API] Build succeeded after {attempt} fix attempts")
+                break
+                
+            attempt += 1
+        
+        return {
+            "initial_build": build_result,
+            "fix_attempts": attempt - 1,
+            "last_fix_applied": last_fix_result,
+            "final_build": build_result,
+            "repo_location": repo_dir,
+            "status": "success" if "Build succeeded" in build_result else "failed"
+        }
+    
+    return {
+        "build_result": build_result,
+        "repo_location": repo_dir,
+        "status": "success"
+    }
 
-        return {"status": "success", "message": "Project updated and built successfully (or fixed).", "build_details": build_result}
-
-    except Exception as e:
-        # Clean up in case of error too
-        # shutil.rmtree(project_path)
-        raise HTTPException(status_code=500, detail=str(e))
-
-# To run this: uvicorn main:app --reload
+if __name__ == "__main__":
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
